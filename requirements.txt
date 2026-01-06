@@ -1,4 +1,4 @@
-nicegui
+nicegui==1.4.13
 tinydb
 passlib
 bcrypt

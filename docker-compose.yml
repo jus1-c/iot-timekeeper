@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   timekeeper:
     container_name: timekeeper_app
@@ -8,10 +6,7 @@ services:
     ports:
       - "8081:8081"
     volumes:
-      # Lưu trữ database ra ngoài máy chủ để không mất dữ liệu
       - ./db.json:/app/db.json
-      # Lưu trữ session của NiceGUI (nếu cần)
       - ./.nicegui:/app/.nicegui
     environment:
-      # Cực kỳ quan trọng: Set múi giờ VN để logic khoá 20h-5h hoạt động đúng
       - TZ=Asia/Ho_Chi_Minh
