@@ -35,7 +35,6 @@ class SystemState:
     def set_emergency(self, is_active):
         self.emergency_mode = is_active
         system_table.update({'emergency_mode': is_active}, doc_ids=[1])
-        # If emergency is triggered, checkout all users
         if is_active:
             users_table.update({'status': 'checkout'})
         self.trigger_update()
@@ -64,7 +63,8 @@ def init_db():
             'position': 'Manager',
             'status': 'checkout',
             'allowed_rooms': ['all'],
-            'uid': 'admin_uid' 
+            'uid': 'admin_uid',
+            'ignore_limit': False
         })
         # Seed User
         users_table.insert({
@@ -76,7 +76,8 @@ def init_db():
             'position': 'Staff',
             'status': 'checkout',
             'allowed_rooms': ['p1', 'p2'],
-            'uid': 'user1_uid'
+            'uid': 'user1_uid',
+            'ignore_limit': False
         })
         print("Database initialized with default users.")
 
@@ -97,12 +98,10 @@ def update_user_status(uid, status):
     state.trigger_update()
 
 def update_user_details(doc_id, data):
-    # Only update provided fields
     if 'password' in data and data['password']:
          data['password'] = get_password_hash(data['password'])
     elif 'password' in data:
-        del data['password'] # Don't update if empty
-        
+        del data['password']
     users_table.update(data, doc_ids=[doc_id])
     state.trigger_update()
 
@@ -111,31 +110,137 @@ def delete_user(doc_id):
     state.trigger_update()
 
 def create_user(data):
-    data['password'] = get_password_hash(data['password'])
-    data['status'] = 'checkout' # Default
+    if 'password' in data:
+        data['password'] = get_password_hash(data['password'])
+    data['status'] = 'checkout'
+    data['ignore_limit'] = data.get('ignore_limit', False)
     users_table.insert(data)
     state.trigger_update()
 
 def add_log(uid, action):
     logs_table.insert({
         'uid': uid,
-        'action': action, # 'in' or 'out'
+        'action': action,
         'timestamp': state.get_current_time().isoformat()
     })
 
 def get_logs_by_user(uid):
     Log = Query()
-    # TinyDB doesn't sort by default, we'll sort in memory
     logs = logs_table.search(Log.uid == uid)
     logs.sort(key=lambda x: x['timestamp'], reverse=True)
     return logs
 
 def get_logs_by_month(uid, year, month):
-    # Filter logs for a specific month
     all_logs = get_logs_by_user(uid)
-    filtered = []
+    return [l for l in all_logs if datetime.fromisoformat(l['timestamp']).year == year and datetime.fromisoformat(l['timestamp']).month == month]
+
+def reset_daily_limit(uid):
+    User = Query()
+    user = users_table.get(User.uid == uid)
+    if user:
+        users_table.update({'ignore_limit': True}, doc_ids=[user.doc_id])
+        print(f"--- ĐÃ BẬT CỜ MỞ KHOÁ CHO {uid} ---")
+        state.trigger_update()
+        return True
+    return False
+
+def calculate_salary(uid, month, year):
+    user = get_user_by_uid(uid)
+    # Check explicitly for None or missing salary
+    if not user or user.get('salary') is None: return 0
+    
+    try:
+        hourly_rate = float(user['salary'])
+    except (ValueError, TypeError):
+        return 0
+        
+    logs = get_logs_by_month(uid, year, month)
+    logs.sort(key=lambda x: x['timestamp']) # Sort chronologically
+    
+    total_salary = 0
+    checkin_time = None
+    
+    # Danh sách ngày lễ Việt Nam (Dương lịch)
+    holidays = [
+        (1, 1),   # Tết Dương lịch
+        (4, 30),  # Giải phóng miền Nam
+        (5, 1),   # Quốc tế Lao động
+        (9, 2),   # Quốc khánh
+    ]
+    
+    for log in logs:
+        t = datetime.fromisoformat(log['timestamp'])
+        if log['action'] == 'in':
+            checkin_time = t
+        elif log['action'] == 'out' and checkin_time:
+            # Calculate session
+            duration_hours = (t - checkin_time).total_seconds() / 3600
+            
+            # Logic tăng lương
+            multiplier = 1.0
+            
+            is_holiday = (t.month, t.day) in holidays
+            is_weekend = t.weekday() >= 5
+            
+            if is_holiday:
+                multiplier = 3.0 # Ngày lễ: x3
+            elif is_weekend:
+                multiplier = 2.0 # Cuối tuần: x2
+            elif t.hour >= 18:
+                multiplier = 1.5 # Ca đêm: x1.5
+            
+            total_salary += duration_hours * hourly_rate * multiplier
+            checkin_time = None
+            
+    return int(total_salary)
+
+def calculate_daily_stats(uid, target_date):
+    """
+    Trả về (số giờ làm, lương ngày) cho một ngày cụ thể.
+    target_date: datetime.date object
+    """
+    user = get_user_by_uid(uid)
+    if not user or user.get('salary') is None: return 0, 0
+    
+    try:
+        hourly_rate = float(user['salary'])
+    except (ValueError, TypeError):
+        return 0, 0
+
+    Log = Query()
+    all_logs = logs_table.search(Log.uid == uid)
+    day_logs = []
     for log in all_logs:
         dt = datetime.fromisoformat(log['timestamp'])
-        if dt.year == year and dt.month == month:
-            filtered.append(log)
-    return filtered
+        if dt.date() == target_date:
+            day_logs.append(log)
+            
+    day_logs.sort(key=lambda x: x['timestamp'])
+    
+    total_hours = 0
+    daily_salary = 0
+    checkin_time = None
+    
+    # Logic ngày lễ/cuối tuần áp dụng cho cả ngày
+    holidays = [(1, 1), (4, 30), (5, 1), (9, 2)]
+    is_holiday = (target_date.month, target_date.day) in holidays
+    is_weekend = target_date.weekday() >= 5
+    
+    for log in day_logs:
+        t = datetime.fromisoformat(log['timestamp'])
+        if log['action'] == 'in':
+            checkin_time = t
+        elif log['action'] == 'out' and checkin_time:
+            duration = (t - checkin_time).total_seconds() / 3600
+            total_hours += duration
+            
+            multiplier = 1.0
+            if is_holiday: multiplier = 3.0
+            elif is_weekend: multiplier = 2.0
+            elif t.hour >= 18: multiplier = 1.5
+            
+            daily_salary += duration * hourly_rate * multiplier
+            checkin_time = None
+            
+    return round(total_hours, 1), int(daily_salary)
+

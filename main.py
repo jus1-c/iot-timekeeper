@@ -1,3 +1,12 @@
+import pkgutil
+import importlib.util
+
+if not hasattr(pkgutil, 'find_loader'):
+    def find_loader(fullname):
+        spec = importlib.util.find_spec(fullname)
+        return spec.loader if spec else None
+    pkgutil.find_loader = find_loader
+
 from nicegui import ui, app
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -24,18 +33,19 @@ async def api_check(request: Request):
         new_status = 'checkin' if current_status == 'checkout' else 'checkout'
         current_time = db.state.get_current_time()
         
-        # --- TRIỂN KHAI CÁC QUY ĐỊNH MỚI ---
         if new_status == 'checkin':
-            # 1. Khung giờ khoá: 20:00 đến 05:00 sáng
-            if (current_time.hour >= 20 or current_time.hour < 5) and user['role'] != 'admin':
-                print(f"Từ chối check-in cho {user['username']}: Đang trong giờ khoá")
-                return JSONResponse({'status': 0})
+            if user.get('ignore_limit'):
+                print(f"Chấp nhận check-in cho {user['username']} do Admin đã mở khoá")
+                db.update_user_details(user.doc_id, {'ignore_limit': False})
+            else:
+                if (current_time.hour >= 20 or current_time.hour < 5) and user['role'] != 'admin':
+                    print(f"Từ chối check-in cho {user['username']}: Đang trong giờ khoá ({current_time.strftime('%H:%M')})")
+                    return JSONResponse({'status': 0})
 
-            # 2. Quy tắc 1 lần duy nhất trong ngày
-            today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
-            if any(datetime.fromisoformat(l['timestamp']) >= today_start and l['action'] == 'out' for l in db.get_logs_by_user(uid)):
-                print(f"Từ chối check-in cho {user['username']}: Đã checkout hôm nay")
-                return JSONResponse({'status': 0})
+                today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                if any(datetime.fromisoformat(l['timestamp']) >= today_start and l['action'] == 'out' for l in db.get_logs_by_user(uid)):
+                    print(f"Từ chối check-in cho {user['username']}: Đã checkout hôm nay")
+                    return JSONResponse({'status': 0})
 
         db.update_user_status(uid, new_status)
         db.add_log(uid, 'in' if new_status == 'checkin' else 'out')
@@ -59,7 +69,7 @@ def login_page():
             user = db.get_user_by_username(username.value)
             if user and db.verify_password(password.value, user['password']):
                 app.storage.user.update({'username': user['username'], 'role': user['role'], 'uid': user.get('uid')})
-                ui.navigate.to('/')
+                ui.open('/')
             else:
                 ui.notify('Tên đăng nhập hoặc mật khẩu không đúng', color='negative')
         except Exception as e:
@@ -108,7 +118,7 @@ def render_efficiency_chart(uid):
 
 def user_dashboard(user):
     view_state = {'year': db.state.get_current_time().year, 'month': db.state.get_current_time().month}
-    calendar_container, history_container, status_label = None, None, None
+    calendar_container, history_container, status_label, salary_label = None, None, None, None
     chart_comp, chart_calc = None, None
 
     def render_calendar_grid():
@@ -130,10 +140,17 @@ def user_dashboard(user):
                         if day == 0: ui.label(''); continue
                         cell_date = datetime(view_state['year'], view_state['month'], day)
                         is_future = cell_date.date() > db.state.get_current_time().date()
-                        card = ui.card().classes('items-center justify-center h-16')
-                        with card: ui.label(str(day))
+                        
+                        card = ui.card().classes('items-center justify-center h-16 relative group')
+                        with card: 
+                            ui.label(str(day))
+                            # Add Tooltip for worked days
+                            if day in days_with_logs:
+                                h_worked, daily_pay = db.calculate_daily_stats(user['uid'], cell_date.date())
+                                ui.tooltip(f"Giờ làm: {h_worked}h | Lương: {daily_pay:,}đ").classes('bg-black text-white p-2 text-sm')
+                        
                         if is_future: card.classes('bg-grey-3 opacity-50')
-                        elif day in days_with_logs: card.classes('bg-green-300')
+                        elif day in days_with_logs: card.classes('bg-green-300 cursor-pointer')
                         else: card.classes('bg-white')
 
     def render_history_list():
@@ -148,11 +165,16 @@ def user_dashboard(user):
         view_state['month'] += delta
         if view_state['month'] > 12: view_state['month'] = 1; view_state['year'] += 1
         elif view_state['month'] < 1: view_state['month'] = 12; view_state['year'] -= 1
-        render_calendar_grid(); render_history_list()
+        render_calendar_grid(); render_history_list(); refresh_salary()
+
+    def refresh_salary():
+        if not salary_label: return
+        sal = db.calculate_salary(user['uid'], view_state['month'], view_state['year'])
+        salary_label.text = f"Lương tháng {view_state['month']}: {sal:,.0f} VNĐ"
 
     last_ts = {'v': 0}
     def refresh_all():
-        render_calendar_grid(); render_history_list()
+        render_calendar_grid(); render_history_list(); refresh_salary()
         if chart_comp:
             d, h = chart_calc()
             chart_comp.options['xAxis']['data'] = d
@@ -171,9 +193,10 @@ def user_dashboard(user):
             with ui.row().classes('items-center gap-4'):
                 ui.label(f"Xin chào, {user['name']}").classes('text-h4')
                 status_label = ui.label().classes('text-h5 font-bold px-4 py-1 rounded')
+            
             with ui.column().classes('items-end'):
-                ui.label('Thời gian hệ thống').classes('text-caption text-gray-500')
                 clock_label = ui.label().classes('text-h5 font-mono')
+                salary_label = ui.label().classes('text-lg text-green-600 font-bold') # Salary display
                 def up_clock(): clock_label.text = db.state.get_current_time().strftime('%H:%M:%S %d/%m/%Y')
                 ui.timer(1.0, up_clock); up_clock()
 
@@ -207,7 +230,7 @@ def render_user_management():
             ui.label(f"Sửa Người Dùng: {u['username']}").classes('text-h6')
             name = ui.input('Họ Tên', value=u.get('name'))
             uid_f = ui.input('UID (Mã thẻ)', value=u.get('uid'))
-            salary = ui.number('Lương', value=u.get('salary'))
+            salary = ui.number('Lương/h (VNĐ)', value=u.get('salary'))
             position = ui.input('Chức Vụ', value=u.get('position'))
             role = ui.select(['user', 'admin'], value=u.get('role'), label='Vai Trò')
             status = ui.select(['checkin', 'checkout'], value=u.get('status'), label='Trạng Thái')
@@ -215,7 +238,7 @@ def render_user_management():
             def save():
                 db.update_user_details(u.doc_id, {'name': name.value, 'uid': uid_f.value, 'salary': salary.value, 'position': position.value, 'role': role.value, 'status': status.value, 'allowed_rooms': [r.strip() for r in rooms_str.value.split(',')]})
                 dialog.close(); is_dialog_open['value'] = False; refresh_list(); ui.notify('Đã Lưu')
-            with ui.row(): ui.button('Lưu', on_click=save); ui.button('Huỷ', on_click=lambda: [dialog.close(), setattr(is_dialog_open, 'value', False)])
+            with ui.row(): ui.button('Lưu', on_click=save); ui.button('Huỷ', on_click=lambda: [dialog.close(), is_dialog_open.update({'value': False})])
             dialog.open()
 
     def delete_user_confirm(u):
@@ -223,8 +246,8 @@ def render_user_management():
         with ui.dialog() as dialog, ui.card():
             ui.label(f"Xoá {u['username']}?")
             with ui.row():
-                ui.button('Có', color='red', on_click=lambda: [db.delete_user(u.doc_id), dialog.close(), setattr(is_dialog_open, 'value', False), refresh_list()])
-                ui.button('Không', on_click=lambda: [dialog.close(), setattr(is_dialog_open, 'value', False)])
+                ui.button('Có', color='red', on_click=lambda: [db.delete_user(u.doc_id), dialog.close(), is_dialog_open.update({'value': False}), refresh_list()])
+                ui.button('Không', on_click=lambda: [dialog.close(), is_dialog_open.update({'value': False})])
             dialog.open()
 
     def add_user_dialog():
@@ -232,11 +255,12 @@ def render_user_management():
         with ui.dialog() as dialog, ui.card():
             ui.label('Thêm Người Dùng Mới').classes('text-h6')
             username, password, name, uid_f = ui.input('Tên đăng nhập'), ui.input('Mật khẩu'), ui.input('Họ tên'), ui.input('UID (Mã thẻ)')
+            salary = ui.number('Lương/h (VNĐ)', value=25000)
             def create():
                 if not username.value or not password.value or not uid_f.value: return ui.notify('Thiếu thông tin', color='red')
-                db.create_user({'username': username.value, 'password': password.value, 'name': name.value, 'uid': uid_f.value, 'role': 'user', 'allowed_rooms': [], 'salary': 0, 'position': 'Nhân viên'})
+                db.create_user({'username': username.value, 'password': password.value, 'name': name.value, 'uid': uid_f.value, 'role': 'user', 'allowed_rooms': [], 'salary': salary.value, 'position': 'Nhân viên'})
                 dialog.close(); is_dialog_open['value'] = False; refresh_list()
-            with ui.row(): ui.button('Tạo', on_click=create); ui.button('Huỷ', on_click=lambda: [dialog.close(), setattr(is_dialog_open, 'value', False)])
+            with ui.row(): ui.button('Tạo', on_click=create); ui.button('Huỷ', on_click=lambda: [dialog.close(), is_dialog_open.update({'value': False})])
             dialog.open()
 
     user_list_container = ui.column().classes('w-full gap-2')
@@ -244,17 +268,36 @@ def render_user_management():
         if is_dialog_open['value']: return
         user_list_container.clear()
         users = db.get_all_users()
+        current_date = db.state.get_current_time()
+        
         with user_list_container:
             ui.button('Thêm Người Dùng', on_click=add_user_dialog).classes('bg-blue-500 text-white')
             with ui.row().classes('w-full font-bold bg-gray-200 p-2'):
-                ui.label('Họ Tên').classes('w-1/4'); ui.label('Vai Trò').classes('w-1/4'); ui.label('Trạng Thái').classes('w-1/4'); ui.label('Hành Động').classes('w-1/4')
+                ui.label('Họ Tên').classes('w-1/6')
+                ui.label('Lương/h').classes('w-1/6')
+                ui.label('Lương Tháng Này').classes('w-1/6')
+                ui.label('Trạng Thái').classes('w-1/6')
+                ui.label('Hành Động').classes('w-1/3 text-center')
             for u in users:
+                cur_salary = db.calculate_salary(u['uid'], current_date.month, current_date.year)
                 with ui.row().classes('w-full items-center border-b p-2'):
-                    ui.label(u.get('name', 'N/A')).classes('w-1/4'); ui.label(u.get('role')).classes('w-1/4')
+                    ui.label(u.get('name', 'N/A')).classes('w-1/6')
+                    # Handle None or invalid salary safely
+                    salary_val = u.get('salary')
+                    salary_display = f"{int(salary_val):,}" if salary_val is not None else "0"
+                    ui.label(salary_display).classes('w-1/6')
+                    ui.label(f"{cur_salary:,}").classes('w-1/6 font-bold text-green-700')
+                    
                     st = u.get('status', 'checkout')
-                    lbl = ui.label(st).classes('w-1/4')
+                    lbl = ui.label(st).classes('w-1/6')
                     if st == 'checkin': lbl.classes('text-green-600 font-bold')
-                    with ui.row().classes('w-1/4 gap-2'):
+                    
+                    with ui.row().classes('w-1/3 gap-2 justify-center'):
+                        def do_reset(user_uid=u['uid'], user_name=u['username']):
+                            if db.reset_daily_limit(user_uid): ui.notify(f'Đã mở khoá cho {user_name}')
+                            else: ui.notify(f'Lỗi mở khoá cho {user_name}', color='negative')
+                            refresh_list()
+                        ui.button('Mở', color='orange', on_click=do_reset).props('size=sm')
                         ui.button('Sửa', on_click=lambda u=u: edit_user(u)).props('size=sm')
                         ui.button('Xoá', color='red', on_click=lambda u=u: delete_user_confirm(u)).props('size=sm')
     refresh_list()
@@ -292,7 +335,7 @@ def render_debug_panel():
 
 @ui.page('/')
 def main_page():
-    if not app.storage.user.get('username'): ui.navigate.to('/login'); return
+    if not app.storage.user.get('username'): ui.open('/login'); return
     db.init_db()
     ui.add_head_html('<style>.blink { animation: blinker 1s linear infinite; } @keyframes blinker { 50% { opacity: 0; } } .emergency-active { background-color: #ffebee !important; } .emergency-active .q-header, .emergency-active .bg-white { background-color: #ffcdd2 !important; }</style>')
     main_c = ui.column().classes('w-full min-h-screen items-center bg-gray-100 transition-colors duration-500')
@@ -303,7 +346,7 @@ def main_page():
             ui.label('Hệ Thống Chấm Công').classes('text-h5')
             with ui.row().classes('items-center gap-4'):
                 ui.label(app.storage.user['username'])
-                ui.button('Đăng Xuất', on_click=lambda: [app.storage.user.clear(), ui.navigate.to('/login')]).props('flat')
+                ui.button('Đăng Xuất', on_click=lambda: [app.storage.user.clear(), ui.open('/login')]).props('flat')
         role = app.storage.user.get('role')
         if role == 'admin': admin_dashboard(app.storage.user)
         else:
