@@ -1,4 +1,6 @@
-nicegui>=1.4.20
+nicegui==1.4.26
+python-socketio==5.11.2
+python-engineio==4.9.1
 tinydb
 passlib
 bcrypt
