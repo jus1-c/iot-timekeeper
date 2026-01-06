@@ -1,14 +1,4 @@
-import pkgutil
-import importlib.util
-
-if not hasattr(pkgutil, 'find_loader'):
-    def find_loader(fullname):
-        spec = importlib.util.find_spec(fullname)
-        return spec.loader if spec else None
-    pkgutil.find_loader = find_loader
-
 from nicegui import ui, app
-
 from fastapi import Request
 from fastapi.responses import JSONResponse
 import db
@@ -69,7 +59,7 @@ def login_page():
             user = db.get_user_by_username(username.value)
             if user and db.verify_password(password.value, user['password']):
                 app.storage.user.update({'username': user['username'], 'role': user['role'], 'uid': user.get('uid')})
-                ui.navigate.to('/')
+                ui.open('/')
             else:
                 ui.notify('Tên đăng nhập hoặc mật khẩu không đúng', color='negative')
         except Exception as e:
@@ -302,7 +292,7 @@ def render_debug_panel():
 
 @ui.page('/')
 def main_page():
-    if not app.storage.user.get('username'): ui.navigate.to('/login'); return
+    if not app.storage.user.get('username'): ui.open('/login'); return
     db.init_db()
     ui.add_head_html('<style>.blink { animation: blinker 1s linear infinite; } @keyframes blinker { 50% { opacity: 0; } } .emergency-active { background-color: #ffebee !important; } .emergency-active .q-header, .emergency-active .bg-white { background-color: #ffcdd2 !important; }</style>')
     main_c = ui.column().classes('w-full min-h-screen items-center bg-gray-100 transition-colors duration-500')
@@ -313,7 +303,7 @@ def main_page():
             ui.label('Hệ Thống Chấm Công').classes('text-h5')
             with ui.row().classes('items-center gap-4'):
                 ui.label(app.storage.user['username'])
-                ui.button('Đăng Xuất', on_click=lambda: [app.storage.user.clear(), ui.navigate.to('/login')]).props('flat')
+                ui.button('Đăng Xuất', on_click=lambda: [app.storage.user.clear(), ui.open('/login')]).props('flat')
         role = app.storage.user.get('role')
         if role == 'admin': admin_dashboard(app.storage.user)
         else:
