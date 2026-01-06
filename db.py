@@ -53,16 +53,8 @@ def get_password_hash(password):
 
 def init_db():
     if not users_table.all():
-        create_user({
-            'username': 'admin',
-            'password': 'admin',
-            'role': 'admin',
-            'name': 'Administrator',
-            'salary': 200000,
-            'position': 'Manager',
-            'uid': 'admin_uid'
-        })
-        print("Database initialized.")
+        # Dữ liệu mẫu sẽ được tạo bởi seed_data.py, hàm này chỉ dự phòng
+        pass
 
 def get_user_by_username(username):
     User = Query()
@@ -118,21 +110,24 @@ def get_logs_by_month(username, year, month):
     return [l for l in all_logs if datetime.fromisoformat(l['timestamp']).year == year and datetime.fromisoformat(l['timestamp']).month == month]
 
 def reset_daily_limit(username):
-    curr_time = state.get_current_time()
-    today = curr_time.date()
+    # Logic MỚI: Chỉ bật cờ cho phép vào lại, KHÔNG XOÁ log cũ
     User = Query()
     user = users_table.get(User.username == username)
-    
-    all_logs = logs_table.search(where('username') == username)
-    ids_to_remove = [log.doc_id for log in all_logs if datetime.fromisoformat(log['timestamp']).date() == today]
-    if ids_to_remove:
-        logs_table.remove(doc_ids=ids_to_remove)
-
     if user:
         users_table.update({'ignore_limit': True}, doc_ids=[user.doc_id])
+        print(f"--- ĐÃ BẬT CỜ MỞ KHOÁ CHO {username} (Giữ nguyên log cũ) ---")
         state.trigger_update()
         return True
     return False
+
+def force_checkout_all():
+    # Checkout tất cả user đang checkin
+    print("--- TỰ ĐỘNG CHECKOUT 5:00 SÁNG ---")
+    users = users_table.search(where('status') == 'checkin')
+    for u in users:
+        update_user_status(u['uid'], 'checkout')
+        add_log(u['username'], 'out')
+    state.trigger_update()
 
 def calculate_salary(username, month, year):
     user = get_user_by_username(username)
@@ -155,10 +150,17 @@ def calculate_salary(username, month, year):
             checkin_time = t
         elif log['action'] == 'out' and checkin_time:
             duration = (t - checkin_time).total_seconds() / 3600
+            
+            # Tính lương: Tách phần làm việc thành các khoảng nếu cần chính xác hơn
+            # Nhưng ở đây dùng logic đơn giản theo yêu cầu:
+            # Cuối tuần x2, Lễ x3, Ca đêm x1.5
+            
             multiplier = 1.0
             if (t.month, t.day) in holidays: multiplier = 3.0
             elif t.weekday() >= 5: multiplier = 2.0
-            elif t.hour >= 18: multiplier = 1.5
+            elif t.hour >= 18 or t.hour < 6: # Coi như làm đêm nếu checkout lúc đêm
+                multiplier = 1.5
+                
             total_salary += duration * hourly_rate * multiplier
             checkin_time = None
     return int(total_salary)
@@ -174,8 +176,10 @@ def calculate_daily_stats(username, target_date):
     all_logs = logs_table.search(Log.username == username)
     day_logs = [log for log in all_logs if datetime.fromisoformat(log['timestamp']).date() == target_date]
     day_logs.sort(key=lambda x: x['timestamp'])
+    
     total_hours, daily_salary, checkin_time = 0, 0, None
     holidays = [(1, 1), (4, 30), (5, 1), (9, 2)]
+    
     for log in day_logs:
         t = datetime.fromisoformat(log['timestamp'])
         if log['action'] == 'in': checkin_time = t
@@ -185,7 +189,9 @@ def calculate_daily_stats(username, target_date):
             multiplier = 1.0
             if (t.month, t.day) in holidays: multiplier = 3.0
             elif t.weekday() >= 5: multiplier = 2.0
-            elif t.hour >= 18: multiplier = 1.5
+            elif t.hour >= 18 or t.hour < 6: multiplier = 1.5
+            
             daily_salary += duration * hourly_rate * multiplier
             checkin_time = None
+            
     return round(total_hours, 1), int(daily_salary)

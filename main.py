@@ -27,15 +27,22 @@ async def api_check(request: Request):
         current_status = user.get('status', 'checkout')
         new_status = 'checkin' if current_status == 'checkout' else 'checkout'
         current_time = db.state.get_current_time()
+        
         if new_status == 'checkin':
+            # 1. Cờ hiệu mở khoá (Ưu tiên cao nhất)
             if user.get('ignore_limit'):
+                print(f"Chấp nhận check-in cho {uname} do Admin đã mở khoá")
                 db.update_user_details(user.doc_id, {'ignore_limit': False})
             else:
+                # 2. Khung giờ khoá: 20:00 đến 05:00 sáng
                 if (current_time.hour >= 20 or current_time.hour < 5) and user['role'] != 'admin':
                     return JSONResponse({'status': 0})
+                
+                # 3. Quy tắc 1 lần duy nhất trong ngày
                 today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
                 if any(datetime.fromisoformat(l['timestamp']) >= today_start and l['action'] == 'out' for l in db.get_logs_by_username(uname)):
                     return JSONResponse({'status': 0})
+        
         db.update_user_status(uid, new_status)
         db.add_log(uname, 'in' if new_status == 'checkin' else 'out')
         return JSONResponse({'status': 1})
@@ -47,6 +54,15 @@ def api_emergency():
     return JSONResponse({}, status_code=200)
 
 app.on_startup(db.init_db)
+
+# --- Background Tasks ---
+def check_auto_checkout():
+    # Kiểm tra mỗi phút, nếu là 5:00 sáng thì force checkout
+    now = db.state.get_current_time()
+    if now.hour == 5 and now.minute == 0:
+        db.force_checkout_all()
+
+ui.timer(60.0, check_auto_checkout)
 
 @ui.page('/login')
 def login():
@@ -174,7 +190,11 @@ def admin_dashboard(user):
                             lbl = ui.label(st).classes('w-1/6')
                             if st == 'checkin': lbl.classes('text-green-600 font-bold')
                             with ui.row().classes('w-1/3 gap-2'):
-                                ui.button('Mở', color='orange', on_click=lambda u=u: [db.reset_daily_limit(u['username']), ui.notify('Đã mở khoá'), refresh_list()]).props('size=sm')
+                                def do_reset(u_name=u['username']):
+                                    if db.reset_daily_limit(u_name): ui.notify(f'Đã mở khoá cho {u_name}')
+                                    else: ui.notify(f'Lỗi mở khoá', color='negative')
+                                    refresh_list()
+                                ui.button('Mở', color='orange', on_click=do_reset).props('size=sm')
                                 ui.button('Sửa', on_click=lambda u=u: edit_user(u)).props('size=sm')
                                 ui.button('Xoá', color='red', on_click=lambda u=u: [db.delete_user(u.doc_id), refresh_list()]).props('size=sm')
             def edit_user(u):
