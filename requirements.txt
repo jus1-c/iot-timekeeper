@@ -1,0 +1,4 @@
+nicegui
+tinydb
+passlib
+bcrypt

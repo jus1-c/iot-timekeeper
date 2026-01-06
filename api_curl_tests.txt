@@ -1,0 +1,33 @@
+# TÀI LIỆU CÁC LỆNH CURL KIỂM TRA API CHẤM CÔNG
+# Server: http://localhost:8081
+
+# 1. CHẤM CÔNG HỢP LỆ (Thẻ card_001 vào phòng p1)
+# Nếu đang ở trạng thái checkout -> status: 1 (Checkin thành công)
+# Nếu đang ở trạng thái checkin -> status: 1 (Checkout thành công)
+curl -X POST http://localhost:8081/check \
+     -H "Content-Type: application/json" \
+     -d "{\"uid\": \"card_001\", \"room\": \"p1\"}"
+
+# 2. CHẤM CÔNG SAI PHÒNG (Thẻ card_002 chỉ được vào p1, thử vào p2)
+# Kết quả mong muốn: status: 0
+curl -X POST http://localhost:8081/check \
+     -H "Content-Type: application/json" \
+     -d "{\"uid\": \"card_002\", \"room\": \"p2\"}"
+
+# 3. THẺ KHÔNG TỒN TẠI
+# Kết quả mong muốn: status: 0
+curl -X POST http://localhost:8081/check \
+     -H "Content-Type: application/json" \
+     -d "{\"uid\": \"the_la_fake\", \"room\": \"p1\"}"
+
+# 4. KÍCH HOẠT CHẾ ĐỘ KHẨN CẤP
+# Kết quả: Server trả về 200, toàn bộ Dashboard chuyển màu đỏ
+curl -X POST http://localhost:8081/emegency
+
+# --- LƯU Ý VỀ TEST LOGIC KHUNG GIỜ VÀ GIỚI HẠN ---
+# - Để test giờ khoá: Vào Admin Dashboard -> Debug -> Chỉnh giờ sang 21:00 -> Chạy lệnh (1).
+#   Kết quả: status: 0 (vì không phải admin).
+# - Để test giới hạn 1 lần/ngày: 
+#   B1: Quẹt lần 1 (vào) -> status: 1
+#   B2: Quẹt lần 2 (ra) -> status: 1
+#   B3: Quẹt lần 3 (vào lại) -> status: 0 (bị chặn do quy tắc 1 lần duy nhất).

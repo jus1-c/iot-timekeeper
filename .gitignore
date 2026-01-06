@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Database (Nên ignore db thật, nhưng với prototype này tôi sẽ giữ lại db.json mẫu để bạn clone về là chạy được luôn)
+# db.json 
+
+# NiceGUI Storage (Session người dùng)
+.nicegui/
+
+# IDE
+.vscode/
+.idea/
